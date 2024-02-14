@@ -25,22 +25,3 @@ def discord_timestamp(date: Optional[datetime], style: TimestampStyle = Timestam
 async def lookup_emoji(ctx: Context, emoji: Union[PartialEmoji, Emoji, str]) -> Emoji:
     if isinstance(emoji, Emoji): return emoji
     return await EmojiConverter().convert(ctx = ctx, argument = str(emoji))
-
-def to_embed(message: Message):
-    embed = discord.Embed(
-        timestamp=message.created_at,
-        url=message.jump_url,
-        type='rich',
-        title=message.channel.name,
-        description=message.content,
-    )
-
-    # TODO: There's no better alternative for this? - should open profile in modal?
-    url = f'https://discord.com/users/{message.author.id}'
-    embed.set_author(
-        name=message.author.display_name,
-        url=url,
-        icon_url=message.author.display_icon.url if message.author.display_icon is not None else None
-    )
-
-    return embed
