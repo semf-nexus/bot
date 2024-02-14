@@ -1,15 +1,24 @@
-import os
+import datetime
 import datetime
 import logging.handlers
+import os
 from typing import Union, Optional, Sequence
 
 import discord
+from discord import Permissions, Activity, Status, ActivityType
+from discord.ext import commands
+from discord.utils import oauth_url
+
+from Count import Count
+
+SEMFCOIN_EMOJI = discord.PartialEmoji(name=os.environ.get("SEMF_SEMFCOIN_EMOJI", 'semfcoin'))
+PRIMARY_GUILD = discord.Object(id=os.environ.get("DISCORD_GUILD_ID", 844566471501414463))
 
 # https://discordpy.readthedocs.io/en/latest/logging.html
 discord.utils.setup_logging(level=logging.INFO)
 
 # https://discordpy.readthedocs.io/en/latest/intents.html
-# intents = discord.Intents.default()
+# intents = bot.Intents.default()
 intents = discord.Intents.all()
 # intents.message_content = True
 # intents.members = True
@@ -24,10 +33,34 @@ intents = discord.Intents.all()
 # intents.webhooks = True
 # intents.guild_scheduled_events = True
 
-class Client(discord.Client):
+# https://discordpy.readthedocs.io/en/latest/api.html#permissions
+default_permissions = discord.Permissions.all()
+
+class Client(commands.Bot):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    async def setup_hook(self) -> None:
+        if os.environ.get("DISCORD_SKIP_HOOK", "0") == "1": return
+
+        print(f'Setting up hook (Might take a bit)')
+
+        # for extension in self.initial_extensions:
+        #     await self.load_extension(extension)
+
+        if PRIMARY_GUILD.id:
+            self.tree.copy_global_to(guild=PRIMARY_GUILD)
+            await self.tree.sync(guild=PRIMARY_GUILD)
+
     # Client
     async def on_ready(self):
         print(f'We have logged in as {self.user}')
+
+        await self.change_presence(activity = Activity(
+            type = ActivityType.custom,
+            name = "SEMF",
+            state = "👀",
+        ), status = Status.online)
 
     # Messages
     async def on_message(self, message: discord.Message):
@@ -67,7 +100,7 @@ class Client(discord.Client):
         pass
     async def on_member_unban(self, guild: discord.Guild, user: discord.User):
         pass
-    # async def on_presence_update(self, before: discord.Member, after: discord.Member):
+    # async def on_presence_update(self, before: bot.Member, after: bot.Member):
     #     pass
 
     # Channels
@@ -158,8 +191,17 @@ class Client(discord.Client):
     async def on_invite_delete(self, invite: discord.Invite):
         pass
 
+async def oauth2_url(client: Client = Client(intents=intents, command_prefix='$'), permissions: Permissions = default_permissions) -> str:
+    # await client.login(os.environ["DISCORD_TOKEN"])
+
+    return oauth_url(os.environ["DISCORD_CLIENT_ID"], permissions = permissions, scopes = ['bot'])
 
 
-client = Client(intents=intents)
+async def run(client: Client = Client(intents=intents, command_prefix='$')):
+    async with client:
+        # Commands (https://discordpy.readthedocs.io/en/stable/ext/commands/cogs.html)
+        count = Count()
+        await client.add_cog(count)
+        await client.add_cog(count.reaction_command(SEMFCOIN_EMOJI.name, SEMFCOIN_EMOJI))
 
-client.run(os.environ["DISCORD_TOKEN"])
+        await client.start(os.environ["DISCORD_TOKEN"])

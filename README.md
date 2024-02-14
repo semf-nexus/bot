@@ -1,15 +1,41 @@
 # [SEMF](https://semf.org.es/) - (Discord) Bot
 
+TODO:
+- [ ] github action deploy
+- [ ] missed ones while bot downtime, recount after x
+- [ ] Offline database sync through `cache.py` + events
+- [ ] cleanup
 
-- [Discord Documentation](https://discord.com/developers/docs/), [discord.py](https://github.com/Rapptz/discord.py)
+### Some useful links
+- [Discord Documentation](https://discord.com/developers/docs/)
+  - [Discord: Rate Limits](https://discord.com/developers/docs/topics/rate-limits#:~:text=global%22%3A%20true%20%7D-,Global%20Rate%20Limit,rate%20limit%20on%20a%20route.)
+- [discord.py](https://github.com/Rapptz/discord.py)
 
 ### Local setup
 
-; TODO MOVE TO pip install
-```ssh
+```shell
+git clone git@github.com:semf-nexus/bot.git \
+&& cd ./bot
+```
+
+*Install dependencies*
+```shell
 python3 -m pip install -U discord.py
 ```
 
-```ssh
-DISCORD_TOKEN="..." python3 ./bot.py
+*Run Discord bot:*
+```shell
+# DISCORD_SKIP_HOOK=1 Skips manually syncing the Discord Interaction (i.e. AppCommands)`
+DISCORD_SKIP_HOOK=0 \
+DISCORD_GUILD_ID=844566471501414463 \
+DISCORD_CLIENT_ID="..." \
+DISCORD_TOKEN="..." \
+python3 ./bot/run.py
+```
+
+*Generating an oauth url to add the bot to a server*
+```shell
+DISCORD_CLIENT_ID="..." \
+DISCORD_TOKEN="..." \
+python3 ./bot/oauth2_url.py
 ```
