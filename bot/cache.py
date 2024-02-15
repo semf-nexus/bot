@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import functools
+import os
+import subprocess
+import traceback
 from asyncio import Queue, create_task
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
-from itertools import groupby
-from typing import Optional, AsyncIterator, Iterable, Generic, TypeVar, Callable, Any, Deque, List, Awaitable
+from datetime import datetime, timezone
+from itertools import groupby, chain
+from typing import Optional, AsyncIterator, Iterable, Generic, TypeVar, Callable, Any, Deque, List, Awaitable, Dict, \
+    Tuple
 
 from discord import Message, Guild, Thread, User, Reaction, CategoryChannel, StageChannel, ForumChannel, VoiceChannel, \
     TextChannel, Member
@@ -31,6 +35,7 @@ class FunctionQueue(Queue):
                     await func()
             except Exception as e:
                 print(f"Task failed with error: {e}")
+                print(traceback.format_exc())
                 raise
 
         self.workers.append(create_task(task()))
@@ -43,6 +48,7 @@ class FunctionQueue(Queue):
                 self.task_done()
             except Exception as e:
                 print(f"Task failed with error: {e}")
+                print(traceback.format_exc())
 
         self.add_dynamic_worker(do_task)
 
@@ -82,6 +88,9 @@ class CacheEntry(Generic[TObject]):
 
     def __init__(self, current: TObject):
         self.current = current
+        # if isinstance(current, Reaction):
+        #     self.current = CachedReaction(reaction=current) # Proxied reaction for additional functionality
+        # else:
 
     async def live(self) -> TObject:
         raise NotImplementedError
@@ -89,15 +98,17 @@ class CacheEntry(Generic[TObject]):
     # TODO: Just this for now until we have a better idea of what to do with an offline mirror\
     @property
     def id(self) -> int | str:
-        return self.current if hasattr(self.current, 'id') else self._dumb_id_gen()
-    def _dumb_id_gen(self) -> str:
-        if isinstance(self.current, Reaction): return f'{self.current.message.id}:{self.current}'
-        raise NotImplementedError(f'for {type(self.current)}')
+        if not hasattr(self.current, 'id'): raise NotImplementedError(f'No "id" property is defined on {type(self.current)}')
+        return self.current.id
+
     def __eq__(self, other: object) -> bool:
         if isinstance(other, CacheEntry): return self.id == other.id
         return self.id == CacheEntry(current=other).id  # TODO Might need to check object type here, but probably not
     
     # TODO: Just isolate to this until we know what to do
+    def is_event(self) -> bool: return isinstance(self.current, Event)
+    def is_user(self) -> bool: return isinstance(self.current, User)
+    def is_member(self) -> bool: return isinstance(self.current, Member)
     def is_reaction(self) -> bool: return isinstance(self.current, Reaction)
     def is_message(self) -> bool: return isinstance(self.current, Message)
     def is_guild(self) -> bool: return isinstance(self.current, Guild)
@@ -110,30 +121,84 @@ class CacheEntry(Generic[TObject]):
     def is_thread(self) -> bool: return isinstance(self.current, Thread)
     def is_messageable(self) -> bool: return isinstance(self.current, Messageable)
 
+    def to_markdown(self) -> str: return self.to_obsidian()
+    def to_obsidian(self) -> str:
+        raise NotImplementedError
+    def to_json(self) -> str:
+        raise NotImplementedError
+
+# class CachedReaction:
+#     def __init__(self, reaction: Reaction, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+#         self.reaction = reaction
+#
+#     def __getattr__(self, attr):
+#         if hasattr(self, attr): return super(attr)
+#         return getattr(self.reaction, attr)
+#
+#     @property
+#     def id(self) -> str:
+#         return f'{self.message.id}:{self.reaction}'
+#
+#     def time_window(self) -> [datetime, datetime]:
+#         pass
+
+@dataclass
+class Event:
+    name: str
+    dispatched_at: datetime
+    args: Tuple[Any, ...]
+    kwargs: Dict[str, Any]
+    __slots__ = ("name", "dispatched_at", "args", "kwargs")
+
+    @property
+    def id(self) -> str:
+        return f'{self.name}:{self.dispatched_at.isoformat()}:{repr(self)}'
+
+    def __repr__(self) -> str:
+        value = ' '.join(f'{attr}={getattr(self, attr)!r}' for attr in self.__slots__)
+        return f'<{self.__class__.__name__} {value}>'
+
+    # From discord.py/_RawReprMixin
+    def dump_compile(self) -> str:
+        def quick_dumb_compile(obj, path: Tuple[Any, ...] = ()) -> str:
+            if len(path) == 1 and path[0] in ('args', 'kwargs'): return ", ".join(map(lambda element: quick_dumb_compile(element, path=(*path, obj)), obj))
+            if len(path) > 2 or not hasattr(obj, '__slots__'): return repr(obj)
+
+            def compile_atr(attr) -> str:
+                if not hasattr(obj, attr): return 'None'
+                return quick_dumb_compile(getattr(obj, attr), path=(*path, attr))
+
+            value = ' '.join(f'{attr}={compile_atr(attr)!r}' for attr in obj.__slots__)
+            return f'<{obj.__class__.__name__} {value}>'
+
+        return quick_dumb_compile(self)
+
 # Note: run.py doesn't have a way of hooking into its caching mechanism (state.py), just implement it separately
 # TODO: Can probably be a lot cleaner - but just to isolate the functionality for now to forward to a db at somepoint
 class Cache(Generic[TObject]):
 
-    def __init__(self, entries: Optional[Iterable[TObject]] = None, parent: Optional[Cache] = None):
+    def __init__(self, parent: Optional[Cache] = None, mirrors: Optional[Iterable[Cache]] = None):
         self.parent = parent
-        self._temp = deque(entries or [])
+        self.mirrors = mirrors
 
-    @functools.cached_property
-    def users(self) -> Cache[User]:
-        return Cache()
-    @functools.cached_property
-    def members(self) -> Cache[Member]:
-        return Cache()
-
-    @functools.cached_property
-    def reactions(self) -> Cache[Reaction]:
-        return Cache()
+    async def initialize(self):
+        if self.mirrors:
+            for mirror in self.mirrors: await mirror.initialize()
 
     @functools.cached_property
     def objects(self) -> Cache[Hashable]:
-        return Cache() if self.parent is None else self.parent.objects
+        return self if self.parent is None else self.parent.objects
 
     # TODO: Could use channel.type here
+    @functools.cached_property
+    def events(self) -> Cache[Event]: return self.objects.filter(lambda o: o.is_event())
+    @functools.cached_property
+    def users(self) -> Cache[User]: return self.objects.filter(lambda o: o.is_user())
+    @functools.cached_property
+    def members(self) -> Cache[Member]: return self.objects.filter(lambda o: o.is_member())
+    @functools.cached_property
+    def reactions(self) -> Cache[Reaction]: return self.messages.flat_map(lambda message: message.current.reactions)
     @functools.cached_property
     def messages(self) -> Cache[Message]: return self.objects.filter(lambda o: o.is_message())
     @functools.cached_property
@@ -168,21 +233,20 @@ class Cache(Generic[TObject]):
     def empty(self) -> bool:
         return self.count() <= 0
 
-    _temp: Deque[CacheEntry[TObject]] # DOESNT WORK WITH MAP/FILTER YET
     def entries(self) -> List[CacheEntry[TObject]]: # todo iterable
-        return list(self._temp)
+        raise NotImplementedError
     def current(self) -> Iterable[TObject]: return map(lambda entry: entry.current, self.entries())
 
     async def push(self, object: TObject) -> None:
         if self.parent: return await self.parent.push(object)
 
-        entry = CacheEntry(current = object)
-        cached_entry = get(self.entries(), id=entry.id)
-        if cached_entry is not None:
-            cached_entry.current = object # TODO; Now it's just last found, this will probably have to be different
-            return
+        entry = CacheEntry(current=object)
 
-        self._temp.append(entry)
+        await self.push_entry(entry)
+        if self.mirrors:
+            for mirror in self.mirrors: await mirror.push_entry(entry)
+    async def push_entry(self, entry: CacheEntry):
+        raise NotImplementedError
 
     # Helper functions
     def get(self, **attrs: Any) -> Optional[TObject]:
@@ -205,11 +269,17 @@ class Cache(Generic[TObject]):
                 return list(map(func, self.parent.entries()))
 
         return MappedCache(parent=self)
+    def flat_map(self, func) -> Cache[TTarget]:
+        class MappedCache(Cache):
+            def entries(self) -> List[CacheEntry[TObject]]:
+                return [CacheEntry(current=obj) for obj in chain.from_iterable(map(func, self.parent.entries()))]
+
+        return MappedCache(parent=self)
     def group_by(self, func) -> Cache[TTarget]:
         class GroupByCache(Cache):
             def entries(self) -> List[CacheEntry[TTarget]]:
                 # TODO: Values are now an iterable TObject, should be CacheEntry[TObject] use Cache(entries= ) for now
-                return [CacheEntry(current=[CacheEntry(current=group), Cache(entries=values)]) for group, values in groupby(self.parent.entries(), func)]
+                return [CacheEntry(current=[CacheEntry(current=group), MemoryCache(entries=values)]) for group, values in groupby(self.parent.entries(), func)]
                 # return map(lambda grouped_entry: [grouped_entry[0], Cache(entries=grouped_entry[1])], groupby(self.parent.entries(), func))
 
         return GroupByCache(parent=self)
@@ -222,7 +292,59 @@ class Cache(Generic[TObject]):
     def first(self) -> Optional[CacheEntry[TObject]]: return None if self.empty() else self.entries()[0]
     def last(self) -> Optional[CacheEntry[TObject]]: return None if self.empty() else self.entries()[-1]
 
-def cached(cache: Callable[[Cache], Cache]):
+class MemoryCache(Cache):
+    _entries: Deque[CacheEntry[TObject]] # TODO DOESNT WORK WITH MAP/FILTER YET
+
+    def __init__(self, entries: Optional[Iterable[TObject]] = None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._entries = deque(entries or [])
+
+    def entries(self) -> List[CacheEntry[TObject]]:
+        return list(self._entries)
+    async def push_entry(self, entry: CacheEntry):
+        cached_entry = get(self.entries(), id=entry.id)
+        if cached_entry is not None:
+            cached_entry.current = entry.current # TODO; Now it's just last found, this will probably have to be different
+            return
+
+        self._entries.append(entry)
+class GitCache(Cache):
+
+    def __init__(self, repository: str, directory: str, branch: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.repository = repository
+        self.directory = directory
+        self.branch = branch
+
+    async def clone(self):
+        # note that it doesn't support dynamic changes to self.directory
+        if not os.path.exists(self.directory): subprocess.run(["git", "clone", self.repository, self.directory])
+
+        # Simple check to prevent local dev issues
+        existing_repository = subprocess.run(["git", "config", "--get", "remote.origin.url"], cwd=self.directory, capture_output=True, text=True).stdout.rstrip()
+        if existing_repository != self.repository: raise Exception(f'Found a repository at "{self.directory}" which does not match "{self.repository}": "{existing_repository}"')
+
+        subprocess.run(["git", "fetch", "--all"], cwd=self.directory)
+        subprocess.run(["git", "reset", "--hard", f'origin/{self.branch}'], cwd=self.directory)
+    async def initialize(self):
+        await self.clone()
+
+    async def push_entry(self, entry: CacheEntry):
+        print(repr(entry.current))
+        # raise NotImplementedError
+        pass
+
+def cached_event(func: Callable):
+    @functools.wraps(func)
+    async def method(self, *args, **kwargs):
+        event = Event(name=func.__name__, dispatched_at=datetime.now(timezone.utc), args=args, kwargs=kwargs)
+
+        await self.cache.events.push(event)
+        return await func(self, *args, **kwargs)
+
+    return method
+
+def cached_traversal(cache: Callable[[Cache], Cache]):
     def decorator(func):
         @functools.wraps(func)
         async def method(self, entry, *args, **kwargs):
@@ -246,24 +368,25 @@ class DiscordTraverser(FunctionQueue):
         self.cache = cache
         self.options = options
 
-    @cached(lambda cache: cache.reactions)
-    async def push_reaction(self, reaction: Reaction):
+    # @cached_traversal(lambda cache: cache.reactions)
+    # async def push_reaction(self, reaction: Reaction):
         # await self.push(reaction.users())
-        pass
-    @cached(lambda cache: cache.users)
+        # pass
+    @cached_traversal(lambda cache: cache.users)
     async def push_user(self, user: User):
         pass
-    @cached(lambda cache: cache.members)
+    @cached_traversal(lambda cache: cache.members)
     async def push_member(self, member: Member):
         pass
 
-    @cached(lambda cache: cache.messages)
+    @cached_traversal(lambda cache: cache.messages)
     async def push_message(self, message: Message):
-        await self.push(message.reactions)
+        # await self.push(message.reactions)
         # await self.push(message.author)
+        pass
 
     @queue
-    @cached(lambda cache: cache.messageables)
+    @cached_traversal(lambda cache: cache.messageables)
     async def push_messageable(self, channel: Messageable):
         await self.push(channel.history(
             before=self.options.before,
@@ -272,11 +395,11 @@ class DiscordTraverser(FunctionQueue):
         ))
 
     @queue
-    @cached(lambda cache: cache.threads)
+    @cached_traversal(lambda cache: cache.threads)
     async def push_thread(self, thread: Thread):
         await self.push_messageable(thread)
     @queue
-    @cached(lambda cache: cache.channels)
+    @cached_traversal(lambda cache: cache.channels)
     async def push_channel(self, channel: GuildChannel):
         if isinstance(channel, Messageable): await self.push_messageable(channel)
         # TODO; now happens double for push_guild
@@ -291,7 +414,7 @@ class DiscordTraverser(FunctionQueue):
                 await self.push(channel.archived_threads(limit = None, before = self.options.before, joined = False, private = False))
 
     @queue
-    @cached(lambda cache: cache.guilds)
+    @cached_traversal(lambda cache: cache.guilds)
     async def push_guild(self, guild: Guild):
         for channel in guild.channels: await self.push_channel(channel)
         # Note: This includes forum threads
@@ -310,7 +433,7 @@ class DiscordTraverser(FunctionQueue):
         if isinstance(source, GuildChannel): await self.push_channel(source); return
         if isinstance(source, Message): await self.push_message(source); return
         if isinstance(source, Guild): await self.push_guild(source); return
-        if isinstance(source, Reaction): await self.push_reaction(source); return
+        # if isinstance(source, Reaction): await self.push_reaction(source); return
         if isinstance(source, User): await self.push_user(source); return
         if isinstance(source, Member): await self.push_member(source); return
 

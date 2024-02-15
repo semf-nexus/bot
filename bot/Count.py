@@ -13,13 +13,8 @@ from discord.abc import GuildChannel
 from discord.app_commands import describe
 from discord.ext.commands import Context, Greedy, hybrid_group, Cog
 
-from cache import DiscordTraverser, Cache, FunctionQueue, CacheEntry
+from cache import DiscordTraverser, Cache, FunctionQueue, CacheEntry, MemoryCache
 from converters import DatetimeConverter, discord_timestamp, lookup_emoji, TimestampStyle
-
-
-class ReactionEntry:
-    def time_window(self) -> [datetime, datetime]:
-        pass
 
 # TODO; Python 3.12 (https://stackoverflow.com/questions/8991506/iterate-an-iterator-by-chunks-of-n-in-python)
 def batched(iterable, n):
@@ -97,7 +92,7 @@ class ReactionCounter(DiscordTraverser):
     message: Optional[Message] = None
 
     def __init__(self, ctx: Context, options: Options, cache: Cache):
-        super().__init__(cache = Cache() if options.skip_cache else cache)
+        super().__init__(cache = MemoryCache() if options.skip_cache else cache)
         self.ctx = ctx
         self.options = options
 
@@ -172,7 +167,7 @@ class ReactionCounter(DiscordTraverser):
 # TODO: Can python do this pretty without this copy-pasta? ; otherwise just use some dynamic classes
 class Count(Cog):
 
-    def __init__(self, cache: Cache = Cache()):
+    def __init__(self, cache: Cache):
         self.global_cache = cache
 
     @hybrid_group()
