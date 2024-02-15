@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from asyncio import sleep
 from dataclasses import dataclass
 from datetime import datetime
@@ -8,10 +9,12 @@ from itertools import islice
 from typing import Optional, List, Union, Callable, Any, Dict, Awaitable
 
 from discord import Message, PartialEmoji, Emoji, ui, ButtonStyle, Interaction, AllowedMentions, Thread, Guild, \
-    Reaction, Embed, Colour
-from discord.abc import GuildChannel
+    Reaction, Embed, Colour, TextChannel
+from discord.abc import GuildChannel, Messageable
 from discord.app_commands import describe
+from discord.ext import tasks
 from discord.ext.commands import Context, Greedy, hybrid_group, Cog
+from discord.utils import get
 
 from cache import DiscordTraverser, Cache, FunctionQueue, CacheEntry, MemoryCache
 from converters import DatetimeConverter, discord_timestamp, lookup_emoji, TimestampStyle
@@ -167,7 +170,8 @@ class ReactionCounter(DiscordTraverser):
 # TODO: Can python do this pretty without this copy-pasta? ; otherwise just use some dynamic classes
 class Count(Cog):
 
-    def __init__(self, cache: Cache):
+    def __init__(self, client, cache: Cache):
+        self.client = client
         self.global_cache = cache
 
     @hybrid_group()
@@ -210,6 +214,14 @@ class Count(Cog):
         cmd = self
 
         class ReactionCommand(Cog):
+            def __init__(self):
+                # self.top_contributors.start()
+                pass
+
+            # @tasks.loop(hours=1)  # Lazily ensure update every hour, can update it from elsewhere
+            # async def top_contributors(self):
+            #
+
             @hybrid_group(name=name)
             @describe(before="ex: 2023-01-01", after="ex: 2023-01-01", skip_cache="Whether to skip the cache and actively search through channels")
             async def reaction_command_group(
@@ -220,6 +232,65 @@ class Count(Cog):
                     ctx=ctx, emojis=[emoji],
                     channels=channels,after=after,before=before,skip_cache=skip_cache
                 )
+
+            # @reaction_command_group.command()
+            # async def top(
+            #     self, ctx: Context,
+            #     channels: Greedy[Union[GuildChannel, Thread]] = None, after: Optional[DatetimeConverter] = None,
+            #     before: Optional[DatetimeConverter] = None, skip_cache: Optional[bool] = False,
+            # ):
+            #     if not cmd.client.is_ready(): return
+            #
+            #     channel = await cmd.client.fetch_channel(os.environ.get("SEMF_TOP_CONTRIBUTIONS_CHANNEL", 1207430024660262932))
+            #     if not isinstance(channel, TextChannel): return
+            #
+            #     message = None
+            #     last_message = True
+            #     async for m in channel.history(limit=100):
+            #         if message is not None: last_message = False
+            #
+            #         if m.author == cmd.client.user and ('Top Contributors' in m.content):
+            #             last_message = message
+            #
+            #     # TODO: Move this top thing elsewhere
+            #     counter = await ReactionCounter(
+            #         ctx=ctx, cache=cmd.global_cache,
+            #         options=ReactionCounter.Options(emojis=[emoji], channels=channels, skip_cache=skip_cache, after=after, before=before)
+            #     ).load_defaults()
+            #
+            #     top = (
+            #         counter.cache.reactions
+            #         .get_all(emoji=counter.options.emojis[0])  # TODO Multi-emoji for general cmds
+            #         .group_by(lambda reaction_entry: int(reaction_entry.current.message.author.id))
+            #         .filter(lambda grouped_entry: (
+            #               # Number of reactions
+            #               grouped_entry.current[1].count()
+            #               # - number of reactions by one-self TODO: could make optional
+            #               - grouped_entry.current[1].filter(
+            #               lambda reaction_entry: reaction_entry.current.me).count()
+            #           ) > 0)
+            #         .sort(lambda grouped_entry: -grouped_entry.current[1].count())
+            #     )
+            #
+            #     await counter.count()
+            #
+            #     if message is None or not last_message:  # TODO; Could be better check perhaps dynamicitem?
+            #         print('create it')
+            #         # await channel.send('test')
+            #         m = "\n".join([
+            #             f'**#{index + 1}: <@{author_entry.current}>: **'
+            #             f'{" ".join([f"`{reaction.count - reactions_cache.filter(lambda reaction_entry: reaction_entry.current.me).count():,}` {str(reaction.emoji)}" for reaction in reactions_cache.current()])}'
+            #
+            #             for index, (author_entry, reactions_cache) in enumerate(list(top.current())[:10])
+            #         ])
+            #         await channel.send(
+            #          allowed_mentions=lambda: AllowedMentions(users=False, roles=False, everyone=True,replied_user=True),
+            #             content=f'## **Top {counter.options.emojis[0]} Contributors**'
+            #                     f'\n{m}',
+            #         )
+            #         return
+            #
+            #     print('edit it')
 
             @reaction_command_group.command()
             @describe(before="ex: 2023-01-01", after="ex: 2023-01-01", skip_cache="Whether to skip the cache and actively search through channels")
@@ -337,9 +408,12 @@ class Count(Cog):
                     embeds=lambda: [embed(index, message_entry, reactions_cache) for
                                     index, (message_entry, reactions_cache) in
                                     enumerate(list(top.current())[:number_of_entries])],
-                    allowed_mentions=lambda: AllowedMentions(users=False, roles=False, everyone=False,replied_user=True),
+                    allowed_mentions=lambda: AllowedMentions(users=False, roles=False, everyone=True,replied_user=True),
                     on_send=on_send
                 )
+
+
+
             # @reaction_command_group.command()
             # @describe(before="ex: 2023-01-01", after="ex: 2023-01-01", skip_cache="Whether to skip the cache and actively search through channels")
             # async def list(

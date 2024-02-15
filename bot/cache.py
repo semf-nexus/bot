@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import functools
+import json
 import os
 import subprocess
 import traceback
@@ -8,7 +10,10 @@ from asyncio import Queue, create_task
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from inspect import isclass
 from itertools import groupby, chain
+from pathlib import Path
+from textwrap import wrap
 from typing import Optional, AsyncIterator, Iterable, Generic, TypeVar, Callable, Any, Deque, List, Awaitable, Dict, \
     Tuple
 
@@ -121,11 +126,35 @@ class CacheEntry(Generic[TObject]):
     def is_thread(self) -> bool: return isinstance(self.current, Thread)
     def is_messageable(self) -> bool: return isinstance(self.current, Messageable)
 
-    def to_markdown(self) -> str: return self.to_obsidian()
-    def to_obsidian(self) -> str:
-        raise NotImplementedError
-    def to_json(self) -> str:
-        raise NotImplementedError
+    def to_dict(self) -> Dict[str, Any]:
+        dump_handled_ids = []
+        def quick_dump_compiler(source) -> Any:
+            if isinstance(source, CacheEntry): return quick_dumb_dict_compiler(source)
+            if type(source) is list or type(source) is tuple: return list(map(quick_dump_compiler, source))
+            if hasattr(source, '__slots__'): return quick_dumb_dict_compiler(CacheEntry(current=source))
+            # if type(source) is dict TODO
+            return source
+        def quick_dumb_dict_compiler(source: CacheEntry) -> Dict[str, Any]:
+            if not hasattr(source.current, '__slots__'): raise Exception(f'cannot compile {type(source.current)}')
+
+            target = {'__type': quick_dump_compiler(source.current.__class__.__name__)} # __type is a bit ugly I suppose
+            if hasattr(source.current, 'id'):
+                target['id'] = source.current.id
+                target['id_b64'] = base64.b64encode(str(source.current.id).encode()).decode()
+
+                if target['id_b64'] in dump_handled_ids:
+                    return target
+                dump_handled_ids.append(target['id_b64'])
+
+            for attr in source.current.__slots__:
+                if attr in ('id', 'guild'): continue # dont nest .guild
+                if not hasattr(source.current, attr): continue
+                target[attr] = quick_dump_compiler(getattr(source.current, attr))
+
+            return target
+
+        return quick_dumb_dict_compiler(self)
+
 
 # class CachedReaction:
 #     def __init__(self, reaction: Reaction, *args, **kwargs):
@@ -153,26 +182,33 @@ class Event:
 
     @property
     def id(self) -> str:
-        return f'{self.name}:{self.dispatched_at.isoformat()}:{repr(self)}'
+        def arg_id(arg) -> str:
+            entry = CacheEntry(current=arg).to_dict()
+            return entry["id"] if "id" in entry else ""
+        return (f':{self.dispatched_at.timestamp()}'
+                f'{self.name}'
+                f':{":".join(map(lambda arg: str(arg_id(arg)), self.args))}'
+                f':{":".join(map(lambda pair: f"{pair[0]}={arg_id(pair[1])}", self.kwargs))}'
+                )
 
-    def __repr__(self) -> str:
-        value = ' '.join(f'{attr}={getattr(self, attr)!r}' for attr in self.__slots__)
-        return f'<{self.__class__.__name__} {value}>'
-
-    # From discord.py/_RawReprMixin
-    def dump_compile(self) -> str:
-        def quick_dumb_compile(obj, path: Tuple[Any, ...] = ()) -> str:
-            if len(path) == 1 and path[0] in ('args', 'kwargs'): return ", ".join(map(lambda element: quick_dumb_compile(element, path=(*path, obj)), obj))
-            if len(path) > 2 or not hasattr(obj, '__slots__'): return repr(obj)
-
-            def compile_atr(attr) -> str:
-                if not hasattr(obj, attr): return 'None'
-                return quick_dumb_compile(getattr(obj, attr), path=(*path, attr))
-
-            value = ' '.join(f'{attr}={compile_atr(attr)!r}' for attr in obj.__slots__)
-            return f'<{obj.__class__.__name__} {value}>'
-
-        return quick_dumb_compile(self)
+    # def __repr__(self) -> str:
+    #     value = ' '.join(f'{attr}={getattr(self, attr)!r}' for attr in self.__slots__)
+    #     return f'<{self.__class__.__name__} {value}>'
+    #
+    # # From discord.py/_RawReprMixin
+    # def dump_compile(self) -> str:
+    #     def quick_dumb_compile(obj, path: Tuple[Any, ...] = ()) -> str:
+    #         if len(path) == 1 and path[0] in ('args', 'kwargs'): return ", ".join(map(lambda element: quick_dumb_compile(element, path=(*path, obj)), obj))
+    #         if len(path) > 2 or not hasattr(obj, '__slots__'): return repr(obj)
+    #
+    #         def compile_atr(attr) -> str:
+    #             if not hasattr(obj, attr): return 'None'
+    #             return quick_dumb_compile(getattr(obj, attr), path=(*path, attr))
+    #
+    #         value = ' '.join(f'{attr}={compile_atr(attr)!r}' for attr in obj.__slots__)
+    #         return f'<{obj.__class__.__name__} {value}>'
+    #
+    #     return quick_dumb_compile(self)
 
 # Note: run.py doesn't have a way of hooking into its caching mechanism (state.py), just implement it separately
 # TODO: Can probably be a lot cleaner - but just to isolate the functionality for now to forward to a db at somepoint
@@ -330,7 +366,22 @@ class GitCache(Cache):
         await self.clone()
 
     async def push_entry(self, entry: CacheEntry):
-        print(repr(entry.current))
+        obj = entry.to_dict()
+        id = obj['id_b64']
+        dir = (f'{self.directory}'
+               f'/{obj["__type"]}'
+               f'/{"/".join(wrap(id[:4], 2))}/{id[4:]}') # git-like object store
+
+        def to_markdown(self) -> str: return self.to_obsidian()
+        def to_obsidian(self) -> str:
+            raise NotImplementedError
+        def to_json() -> str:
+            # https://stackoverflow.com/a/36142844/22730673
+            return json.dumps(obj, indent=2, sort_keys=True, default=str)
+
+        Path(dir).mkdir(parents=True, exist_ok=True)
+        print(to_json(), file=open(f'{dir}/{id}.json', 'w'))
+        print(f'{dir}/{id}.json')
         # raise NotImplementedError
         pass
 

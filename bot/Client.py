@@ -5,9 +5,10 @@ import os
 from typing import Union, Optional, Sequence
 
 import discord
-from discord import Permissions, Activity, Status, ActivityType
-from discord.ext import commands
-from discord.utils import oauth_url
+from discord import Permissions, Activity, Status, ActivityType, TextChannel, NotFound
+from discord.abc import Messageable
+from discord.ext import commands, tasks
+from discord.utils import oauth_url, get
 
 from Count import Count
 from cache import Cache, cached_event, MemoryCache, GitCache
@@ -262,7 +263,7 @@ async def run(client: Client = Client(
 )):
     async with client:
         # Commands (https://discordpy.readthedocs.io/en/stable/ext/commands/cogs.html)
-        count = Count(cache=client.cache)
+        count = Count(client=client, cache=client.cache)
         await client.add_cog(count)
         await client.add_cog(count.reaction_command(SEMFCOIN_EMOJI.name, SEMFCOIN_EMOJI))
 
